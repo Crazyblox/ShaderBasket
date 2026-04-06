@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ShaderBasket</title>
+<style>
+    body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
+    canvas { width: 100vw; height: 100vh; display: block; }
+    
+    #ui-layer {
+        position: absolute;
+        top: 10px;
+        left: 10px;
+        display: flex;
+        gap: 10px;
+        z-index: 10;
+        transition: opacity 0.2s ease;
+        opacity: 1;
+        pointer-events: auto; 
+    }
+
+    /* Add this new class */
+    #ui-layer.hidden {
+        opacity: 0;
+        pointer-events: none; 
+    }
+
+    button {
+        background: rgba(40, 40, 40, 0.8);
+        color: white;
+        border: 1px solid #555;
+        padding: 8px 15px;
+        cursor: pointer;
+        border-radius: 4px;
+        transition: background 0.2s;
+    }
+
+    button:hover {
+        background: rgba(80, 80, 80, 0.8);
+    }
+
+#time-container {
+    background: rgba(40, 41, 40, 0.8);
+    color: white;
+    border: 1px solid #555;
+    padding: 8px 15px;
+    cursor: pointer;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 60px;
+    user-select: none;
+}
+
+#time-input {
+    background: #222;
+    color: #00ff00;
+    border: 1px solid #888;
+    width: 60px;
+    padding: 2px;
+    font-family: monospace;
+    text-align: center;
+    border-radius: 2px;
+    outline: none;
+    display: none;
+}
+
+    #error-log {
+        position: absolute; top: 0; left: 0; 
+        color: #ff5555; background: rgba(0,0,0,0.8);
+        padding: 10px; font-family: monospace;
+        white-space: pre-wrap; pointer-events: none;
+        max-height: 100vh; overflow: auto;
+        display: none; z-index: 20;
+    }
+    #error-log:not(:empty) { display: block; }
+
+    #editor-overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        background: rgba(0, 0, 0, 0.85);
+        display: none;
+        flex-direction: column;
+        z-index: 30;
+        box-sizing: border-box;
+        padding: 20px;
+    }
+
+    #shader-input {
+        flex: 1;
+        background: #1a1a1a;
+        color: #ddd;
+        font-family: 'Courier New', Courier, monospace;
+        font-size: 14px;
+        padding: 15px;
+        border: 1px solid #444;
+        border-radius: 4px;
+        resize: none;
+        outline: none;
+    }
+
+    .editor-controls {
+        margin-top: 15px;
+        display: flex;
+        gap: 10px;
+        justify-content: flex-end;
+    }
+    
+    #apply-btn { background: #28a745; border-color: #1e7e34; }
+    #apply-btn:hover { background: #218838; }
+    #close-editor-btn { background: #dc3545; border-color: #b02a37; }
+    #close-editor-btn:hover { background: #c82333; }
+</style>
+</head>
+<body>
+
+<div id="ui-layer">
+    <div id="time-container">
+        <span id="time-display">0.00</span>
+        <input type="number" id="time-input" step="0.01">
+    </div>
+    <button id="pauseBtn">Pause</button>
+    <button id="loadBtn">Load .glsl</button>
+    <button id="editBtn">Edit Code</button> <!-- Added this -->
+    <input type="file" id="fileInput" accept=".glsl,.frag,.fs,.vert" style="display:none">
+</div>
+
+<div id="error-log"></div>
+
+<div id="editor-overlay">
+    <textarea id="shader-input" placeholder="Paste your Shadertoy code here..."></textarea>
+    <div class="editor-controls">
+        <button id="applyBtn">Apply & Run</button>
+        <button id="closeEditorBtn">Close</button>
+    </div>
+</div>
+
+<canvas id="glCanvas"></canvas>
+
+<script id="vertexShader" type="x-shader/x-vertex">
+    attribute vec2 position;
+    void main() {
+        gl_Position = vec4(position, 0.0, 1.0);
+    }
+</script>
+
+<script id="fragmentShader" type="x-shader/x-fragment">
+    void mainImage( out vec4 fragColor, in vec2 fragCoord )
+    {
+        vec2 uv = fragCoord/iResolution.xy;
+        vec3 col = 0.5 + 0.5*cos(iTime+uv.xyx+vec3(0,2,4));
+        fragColor = vec4(col,1.0);
+    }
+</script>
+
+<script>
+    const canvas = document.getElementById('glCanvas');
+    const gl = canvas.getContext('webgl2');
+    const errorLog = document.getElementById('error-log');
+    const pauseBtn = document.getElementById('pauseBtn');
+    const loadBtn = document.getElementById('loadBtn');
+    const fileInput = document.getElementById('fileInput');
+
+    // Editor Elements
+    const editBtn = document.getElementById('editBtn');
+    const editorOverlay = document.getElementById('editor-overlay');
+    const shaderInput = document.getElementById('shader-input');
+    const applyBtn = document.getElementById('applyBtn');
+    const closeEditorBtn = document.getElementById('closeEditorBtn');
+
+    // Time display and editor
+    const timeContainer = document.getElementById('time-container');
+    const timeDisplay = document.getElementById('time-display');
+    const timeInputElem = document.getElementById('time-input');
+
+    // Initialize the UI layer reference
+    const uiLayer = document.getElementById('ui-layer');
+
+
+    if (!gl) {
+        errorLog.textContent = "WebGL 2 not supported";
+    }
+
+    let program;
+    let isPaused = false;
+    let accumulatedTime = 0;
+    let lastTimestamp = 0;
+    let frameCount = 0;
+    let isEditingTime = false; // This tracks if the time input is active
+    let currentShaderSource = document.getElementById('fragmentShader').text; // Track current code
+
+    let resLoc, timeLoc, mouseLoc, positionLocation;
+
+    function createShader(gl, type, source) {
+        const shader = gl.createShader(type);
+        let modifiedSource = source;
+        
+        if (type === gl.FRAGMENT_SHADER) {
+            const header = `
+                precision highp float;
+                uniform vec3 iResolution;
+                uniform float iTime;
+                uniform vec4 iMouse;
+                uniform sampler2D iChannel0;
+            `;
+            const footer = `
+                void main() {
+                    mainImage(gl_FragColor, gl_FragCoord.xy);
+                }
+            `;
+            if (source.includes('void mainImage') || !source.includes('void main()')) {
+                modifiedSource = header + source + footer;
+            }
+        }
+
+        gl.shaderSource(shader, modifiedSource);
+        gl.compileShader(shader);
+        
+        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            const info = gl.getShaderInfoLog(shader);
+            gl.deleteShader(shader);
+            throw new Error(info);
+        }
+        return shader;
+    }
+
+    function createProgram(gl, vsSource, fsSource) {
+        const vs = createShader(gl, gl.VERTEX_SHADER, vsSource);
+        const fs = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
+        const prog = gl.createProgram();
+        gl.attachShader(prog, vs);
+        gl.attachShader(prog, fs);
+        gl.linkProgram(prog);
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+            throw new Error(gl.getProgramInfoLog(prog));
+        }
+        return prog;
+    }
+
+    function setupProgram(fsSource) {
+        try {
+            const vsSource = document.getElementById('vertexShader').text;
+            const newProgram = createProgram(gl, vsSource, fsSource);
+            program = newProgram;
+            
+            positionLocation = gl.getAttribLocation(program, "position");
+            resLoc = gl.getUniformLocation(program, "iResolution");
+            timeLoc = gl.getUniformLocation(program, "iTime");
+            mouseLoc = gl.getUniformLocation(program, "iMouse");
+            
+            errorLog.textContent = "";
+            currentShaderSource = fsSource; // Update tracked source
+            console.log("Shader loaded successfully");
+        } catch (e) {
+            errorLog.textContent = "Shader Error: " + e.message;
+            console.error(e);
+        }
+    }
+
+    const vertices = new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]);
+    const buffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+
+    setupProgram(currentShaderSource);
+
+    // Time editor logic
+    timeContainer.addEventListener('click', (e) => {
+        // If we are clicking the input itself, don't trigger the toggle
+        if (e.target === timeInputElem) return;
+
+        isEditingTime = true;
+        timeDisplay.style.display = 'none';
+        timeInputElem.style.display = 'inline-block';
+        timeInputElem.value = accumulatedTime.toFixed(2);
+        timeInputElem.focus();
+        resetFadeTimer(); // Keep UI visible while editing
+    });
+
+    // Handle saving the value when clicking away (blur) or pressing Enter
+    const saveTime = () => {
+        isEditingTime = false;
+        const newValue = parseFloat(timeInputElem.value);
+        if (!isNaN(newValue)) {
+            accumulatedTime = newValue;
+        }
+        timeDisplay.style.display = 'inline-block';
+        timeInputElem.style.display = 'none';
+    };
+
+    // Controls logic
+    timeInputElem.addEventListener('blur', saveTime);
+    timeInputElem.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') saveTime();
+    });
+
+    pauseBtn.addEventListener('click', () => {
+        isPaused = !isPaused;
+        pauseBtn.textContent = isPaused ? "Play" : "Pause";
+    });
+
+    loadBtn.addEventListener('click', () => fileInput.click());
+
+    fileInput.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (event) => setupProgram(event.target.result);
+        reader.readAsText(file);
+    });
+
+    // Editor logic
+    editBtn.addEventListener('click', () => {
+        shaderInput.value = currentShaderSource; // Load current code into box
+        editorOverlay.style.display = 'flex';
+    });
+
+    closeEditorBtn.addEventListener('click', () => {
+        editorOverlay.style.display = 'none';
+    });
+
+    applyBtn.addEventListener('click', () => {
+        setupProgram(shaderInput.value);
+        editorOverlay.style.display = 'none';
+    });
+
+    let mouseX = 0, mouseY = 0, isMouseDown = 0;
+    canvas.addEventListener('mousemove', (e) => {
+        mouseX = e.clientX;
+        mouseY = canvas.height - e.clientY;
+    });
+    canvas.addEventListener('mousedown', () => isMouseDown = 1);
+    canvas.addEventListener('mouseup', () => isMouseDown = 0);
+
+    // UI Fade Logic
+    let fadeTimeout;
+    const UI_FADE_DELAY = 1000; // 1 second
+
+    function resetFadeTimer() {
+        // 1. Make UI visible immediately
+        uiLayer.classList.remove('hidden');
+
+        // 2. Clear any existing timer
+        clearTimeout(fadeTimeout);
+
+        // 3. If the editor is open, do NOT start a new timer
+        if (editorOverlay.style.display === 'flex' || isEditingTime) {
+            return;
+        }
+
+        // 4. Start timer to hide UI after delay
+        fadeTimeout = setTimeout(() => {
+            uiLayer.classList.add('hidden');
+        }, UI_FADE_DELAY);
+    }
+
+    // Listen for mouse movement and clicks anywhere on the window
+    window.addEventListener('mousemove', resetFadeTimer);
+    window.addEventListener('mousedown', resetFadeTimer);
+
+    // Also reset timer when the editor is closed so the UI stays visible for a few seconds
+    closeEditorBtn.addEventListener('click', () => {
+        editorOverlay.style.display = 'none';
+        resetFadeTimer(); 
+    });
+    
+    applyBtn.addEventListener('click', () => {
+        setupProgram(shaderInput.value);
+        editorOverlay.style.display = 'none';
+        resetFadeTimer();
+    });
+
+    // Start the timer once on load
+    resetFadeTimer();
+
+    function updateFavicon(sourceCanvas) {
+        // Find/create the favicon link element
+        let link = document.querySelector("link[rel~='icon']");
+        if (!link) {
+            link = document.createElement('link');
+            link.rel = 'icon';
+            document.head.appendChild(link);
+        }
+
+        // Create a 32x32 offscreen canvas for the icon
+        const thumbCanvas = document.createElement('canvas');
+        thumbCanvas.width = 32;
+        thumbCanvas.height = 32;
+        const ctx = thumbCanvas.getContext('2d');
+
+        // Draw the large shader canvas onto the tiny canvas
+        ctx.drawImage(sourceCanvas, 0, 0, 32, 32);
+
+        // Update the favicon href
+        link.href = thumbCanvas.toDataURL("image/png");
+    }
+
+    function render(timestamp) {
+        if (!lastTimestamp) lastTimestamp = timestamp;
+        const deltaTime = (timestamp - lastTimestamp) * 0.001;
+        lastTimestamp = timestamp;
+
+        if (!isPaused) {
+            accumulatedTime += deltaTime;
+        }
+
+        timeDisplay.textContent = accumulatedTime.toFixed(2);
+
+        if (canvas.width !== window.innerWidth || canvas.height !== window.innerHeight) {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            gl.viewport(0, 0, canvas.width, canvas.height);
+        }
+
+        if (program) {
+            gl.useProgram(program);
+            gl.enableVertexAttribArray(positionLocation);
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+            gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+
+            gl.uniform3f(resLoc, canvas.width, canvas.height, 1.0);
+            gl.uniform1f(timeLoc, accumulatedTime);
+            gl.uniform4f(mouseLoc, mouseX, mouseY, isMouseDown, 0.0);
+
+            gl.drawArrays(gl.TRIANGLES, 0, 6);
+        }
+
+        frameCount++;
+        // Update favicon roughly once every 60 frames (approx 1 second at 60fps)
+        if (frameCount % 60 === 0) {
+            updateFavicon(canvas);
+        }
+
+        requestAnimationFrame(render);
+    }
+
+    requestAnimationFrame(render);
+</script>
+</body>
+</html>
