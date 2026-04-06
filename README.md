@@ -2,6 +2,7 @@
 
 # 🧺 ShaderBasket
 A lightweight HTML wrapper for loading, editing, and viewing fragment ShaderToy shaders locally.
+Visit [Github Pages](https://Crazyblox.github.io/ShaderBasket/)
 
 ## Features
 - **Local Loading:** Load .glsl files directly from your machine.
